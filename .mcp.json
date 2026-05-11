@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "google-drive": {
+      "type": "url",
+      "url": "https://drivemcp.googleapis.com/mcp/v1",
+      "description": "Access client data rooms and shared documents"
+    },
+    "google-sheets": {
+      "type": "url",
+      "url": "https://sheetsmcp.googleapis.com/mcp/v1",
+      "description": "Read/write financial models and structured data"
+    },
+    "gmail": {
+      "type": "url",
+      "url": "https://gmailmcp.googleapis.com/mcp/v1",
+      "description": "Monitor engagement emails and data deliveries"
+    },
+    "google-calendar": {
+      "type": "url",
+      "url": "https://calendarmcp.googleapis.com/mcp/v1",
+      "description": "Track engagement milestones and stakeholder meetings"
+    }
+  }
+}
