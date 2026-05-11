@@ -461,6 +461,172 @@ class GoogleSheetsClient:
         return f"Written working capital analysis to {worksheet_name}"
 
 
+# --- Mock Sheets Client (Demo Mode) ---
+
+class MockSheetsClient:
+    """
+    Mock client that simulates Google Sheets by writing to local CSV files.
+    Use this for demos and testing without setting up Google Cloud credentials.
+    
+    Usage:
+        client = MockSheetsClient()  # or MockSheetsClient(output_dir="my_outputs")
+        client.write_drl_to_sheet(drl, "demo_spreadsheet")
+        client.write_working_capital_analysis(wc_data, "demo_spreadsheet")
+    """
+    
+    def __init__(self, output_dir: str = "outputs/sheets_mock"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._spreadsheets: dict[str, dict[str, list[list[str]]]] = {}
+    
+    def is_connected(self) -> bool:
+        """Always returns True for mock client."""
+        return True
+    
+    def create_spreadsheet(self, title: str) -> str:
+        """Create a mock spreadsheet (just a directory)."""
+        spreadsheet_dir = self.output_dir / title
+        spreadsheet_dir.mkdir(parents=True, exist_ok=True)
+        self._spreadsheets[title] = {}
+        return title
+    
+    def write_drl_to_sheet(self, drl: "DataRequestList", spreadsheet_id: str,
+                           worksheet_name: str = "Data Request List") -> str:
+        """Write DRL to a local CSV file."""
+        spreadsheet_dir = self.output_dir / spreadsheet_id
+        spreadsheet_dir.mkdir(parents=True, exist_ok=True)
+        
+        headers = ["Category", "Item", "Priority", "Status", "Received Date",
+                   "Source File", "Notes", "Confidence"]
+        
+        rows = [headers]
+        for item in drl.items:
+            rows.append([
+                item.category,
+                item.item,
+                str(item.priority),
+                item.status,
+                item.received_date or "",
+                item.source_file or "",
+                item.notes or "",
+                item.confidence
+            ])
+        
+        # Write CSV
+        csv_path = spreadsheet_dir / f"{worksheet_name.replace(' ', '_')}.csv"
+        with open(csv_path, "w") as f:
+            for row in rows:
+                f.write(",".join(f'"{cell}"' for cell in row) + "\n")
+        
+        # Also write JSON for easier parsing
+        json_path = spreadsheet_dir / f"{worksheet_name.replace(' ', '_')}.json"
+        with open(json_path, "w") as f:
+            json.dump([dict(zip(headers, row)) for row in rows[1:]], f, indent=2)
+        
+        print(f"📄 Mock Sheets: Written {len(drl.items)} items to {csv_path}")
+        return f"Written {len(drl.items)} items to {csv_path}"
+    
+    def write_extraction_to_sheet(self, extraction: ExtractionResult, spreadsheet_id: str,
+                                   worksheet_name: str = "Extractions") -> str:
+        """Append extraction to a local CSV file."""
+        spreadsheet_dir = self.output_dir / spreadsheet_id
+        spreadsheet_dir.mkdir(parents=True, exist_ok=True)
+        
+        csv_path = spreadsheet_dir / f"{worksheet_name}.csv"
+        
+        headers = ["Timestamp", "Document Type", "Source File", "Confidence",
+                   "Data Summary", "Quality Checks", "Gaps", "Notes"]
+        
+        row = [
+            extraction.extracted_at,
+            extraction.document_type,
+            extraction.source_file,
+            extraction.confidence,
+            json.dumps(extraction.data)[:200],
+            json.dumps(extraction.quality_checks),
+            ", ".join(extraction.gaps),
+            "; ".join(extraction.notes)
+        ]
+        
+        # Check if file exists to determine if we need headers
+        write_headers = not csv_path.exists()
+        
+        with open(csv_path, "a") as f:
+            if write_headers:
+                f.write(",".join(f'"{h}"' for h in headers) + "\n")
+            f.write(",".join(f'"{cell}"' for cell in row) + "\n")
+        
+        print(f"📄 Mock Sheets: Appended extraction to {csv_path}")
+        return f"Appended extraction for {extraction.source_file}"
+    
+    def write_working_capital_analysis(self, wc_data: dict[str, Any], spreadsheet_id: str,
+                                        worksheet_name: str = "Working Capital") -> str:
+        """Write working capital analysis to local files."""
+        spreadsheet_dir = self.output_dir / spreadsheet_id
+        spreadsheet_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Write formatted text report
+        txt_path = spreadsheet_dir / f"{worksheet_name.replace(' ', '_')}.txt"
+        with open(txt_path, "w") as f:
+            f.write("=" * 50 + "\n")
+            f.write("WORKING CAPITAL ANALYSIS\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"Generated: {datetime.now(timezone.utc).isoformat()}\n\n")
+            f.write(f"Net Working Capital:        ${wc_data['net_working_capital']:>15,.0f}\n")
+            f.write(f"NWC % of Revenue:           {wc_data['nwc_pct_revenue']:>15.1f}%\n")
+            f.write(f"Days Sales Outstanding:     {wc_data['days_sales_outstanding']:>15.1f}\n")
+            f.write(f"Days Payable Outstanding:   {wc_data['days_payable_outstanding']:>15.1f}\n")
+            f.write(f"Days Inventory Outstanding: {wc_data['days_inventory_outstanding']:>15.1f}\n")
+            f.write(f"Cash Conversion Cycle:      {wc_data['cash_conversion_cycle']:>15.1f} days\n")
+            f.write("\n" + "-" * 50 + "\n")
+            f.write("Assessment Notes:\n")
+            for note in wc_data.get("notes", []):
+                f.write(f"  • {note}\n")
+            f.write("=" * 50 + "\n")
+        
+        # Also write JSON
+        json_path = spreadsheet_dir / f"{worksheet_name.replace(' ', '_')}.json"
+        with open(json_path, "w") as f:
+            json.dump(wc_data, f, indent=2)
+        
+        print(f"📄 Mock Sheets: Written working capital analysis to {txt_path}")
+        return f"Written working capital analysis to {txt_path}"
+    
+    def read_sheet_to_dict(self, spreadsheet_id: str, worksheet_name: str) -> list[dict[str, Any]]:
+        """Read a mock sheet from JSON file."""
+        json_path = self.output_dir / spreadsheet_id / f"{worksheet_name.replace(' ', '_')}.json"
+        if json_path.exists():
+            with open(json_path) as f:
+                return json.load(f)
+        return []
+
+
+def get_sheets_client(demo_mode: bool = False, credentials_path: Optional[str] = None) -> GoogleSheetsClient | MockSheetsClient:
+    """
+    Factory function to get the appropriate sheets client.
+    
+    Args:
+        demo_mode: If True, always return MockSheetsClient
+        credentials_path: Path to Google credentials JSON (optional)
+    
+    Returns:
+        GoogleSheetsClient if credentials available and demo_mode=False
+        MockSheetsClient otherwise
+    """
+    if demo_mode:
+        print("📋 Using Mock Sheets Client (demo mode)")
+        return MockSheetsClient()
+    
+    creds_path = credentials_path or os.environ.get("GOOGLE_SHEETS_CREDENTIALS")
+    
+    if SHEETS_SUPPORT and creds_path and Path(creds_path).exists():
+        print("📋 Using Google Sheets Client (authenticated)")
+        return GoogleSheetsClient(creds_path)
+    else:
+        print("📋 Using Mock Sheets Client (no credentials found)")
+        return MockSheetsClient()
+
+
 # --- Data Request List Tracker ---
 
 @dataclass
@@ -707,16 +873,31 @@ if __name__ == "__main__":
             print(f"   Credentials found: {creds_path}")
             print("   Ready to connect!")
         else:
-            print("   To enable:")
+            print("   To enable real Google Sheets:")
             print("   1. Create a service account in Google Cloud Console")
             print("   2. Download the JSON credentials")
             print("   3. Set GOOGLE_SHEETS_CREDENTIALS=/path/to/creds.json")
             print("   4. Share your spreadsheet with the service account email")
     else:
-        print("❌ gspread not installed")
+        print("ℹ️  gspread not installed (optional)")
         print("   Install with: pip install gspread google-auth")
+    
+    # Demo 5: Mock Sheets Client (always available)
+    print("\n📝 Mock Sheets Demo (Local Files)\n")
+    print("   Writing demo data to outputs/sheets_mock/demo_engagement/...")
+    
+    # Get a sheets client (will use mock since no credentials)
+    sheets = get_sheets_client(demo_mode=True)
+    
+    # Write DRL to mock sheet
+    sheets.write_drl_to_sheet(drl, "demo_engagement")
+    
+    # Write working capital analysis to mock sheet
+    sheets.write_working_capital_analysis(wc, "demo_engagement")
+    
+    print("\n   Mock outputs created! Check outputs/sheets_mock/demo_engagement/")
 
-    # Demo 5: Document Classification
+    # Demo 6: Document Classification
     print("\n🔍 Document Classification Demo\n")
     sample_texts = [
         "Balance Sheet as of December 31, 2025. Total Assets: $10M",
@@ -735,6 +916,8 @@ if __name__ == "__main__":
     print("      extract_text_from_pdf,")
     print("      process_pdf_for_extraction,")
     print("      GoogleSheetsClient,")
+    print("      MockSheetsClient,")
+    print("      get_sheets_client,")
     print("      DataRequestList,")
     print("      calculate_working_capital_metrics")
     print("  )")

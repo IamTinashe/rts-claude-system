@@ -138,9 +138,80 @@ python -c "
 from scripts.data_extraction import (
     process_pdf_for_extraction,
     GoogleSheetsClient,
+    MockSheetsClient,
+    get_sheets_client,
     calculate_working_capital_metrics
 )
 "
+```
+
+### Demo Mode (No Setup Required)
+
+The pipeline includes a **MockSheetsClient** that writes to local CSV/JSON files instead of Google Sheets.
+This is perfect for demos and testing:
+
+```python
+from scripts.data_extraction import get_sheets_client, DataRequestList
+
+# Get a mock client (no credentials needed)
+client = get_sheets_client(demo_mode=True)
+
+# Write data to local files in outputs/sheets_mock/
+drl = DataRequestList()
+client.write_drl_to_sheet(drl, "my_engagement")
+# Creates: outputs/sheets_mock/my_engagement/Data_Request_List.csv
+# Creates: outputs/sheets_mock/my_engagement/Data_Request_List.json
+```
+
+### Google Sheets Setup (Optional)
+
+To write directly to Google Sheets:
+
+#### Step 1: Create Google Cloud Project
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project (e.g., "RTS Automation")
+3. Enable the **Google Sheets API** and **Google Drive API**
+
+#### Step 2: Create Service Account
+1. Go to **IAM & Admin > Service Accounts**
+2. Click **Create Service Account**
+3. Name it (e.g., "rts-sheets-writer")
+4. Click **Create and Continue** (skip optional permissions)
+5. Click **Done**
+
+#### Step 3: Download Credentials
+1. Click on the service account you created
+2. Go to **Keys** tab
+3. Click **Add Key > Create new key**
+4. Select **JSON** and download
+5. Save to a secure location (e.g., `~/.config/rts/sheets-credentials.json`)
+
+#### Step 4: Share Your Spreadsheet
+1. Open your Google Spreadsheet
+2. Click **Share**
+3. Add the service account email (looks like `xxx@project-id.iam.gserviceaccount.com`)
+4. Give it **Editor** access
+
+#### Step 5: Configure Environment
+```bash
+# Add to your shell profile (~/.zshrc or ~/.bashrc)
+export GOOGLE_SHEETS_CREDENTIALS="$HOME/.config/rts/sheets-credentials.json"
+
+# Or pass directly in code
+from scripts.data_extraction import GoogleSheetsClient
+client = GoogleSheetsClient("/path/to/credentials.json")
+```
+
+#### Step 6: Use the Client
+```python
+from scripts.data_extraction import GoogleSheetsClient, DataRequestList
+
+client = GoogleSheetsClient()
+drl = DataRequestList()
+
+# Write to a spreadsheet (use the spreadsheet ID from the URL)
+# https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit
+client.write_drl_to_sheet(drl, "your-spreadsheet-id")
 ```
 
 ## Key Design Decisions
