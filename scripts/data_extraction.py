@@ -6,23 +6,47 @@ Glue code that connects document sources to the Claude-powered
 extraction pipeline. This script:
 
 1. Watches a folder (or Google Drive via API) for new documents
-2. Classifies each document by type
-3. Routes to the appropriate extraction prompt
-4. Validates extracted data against quality rules
-5. Stores structured outputs for analysis
+2. Parses PDFs and extracts text content
+3. Classifies each document by type
+4. Routes to the appropriate extraction prompt
+5. Validates extracted data against quality rules
+6. Stores structured outputs to local files and Google Sheets
 
 This demonstrates the Python glue code, data extraction, and
 integration skills required by the engagement.
+
+Dependencies:
+    pip install pymupdf gspread google-auth
+
+Optional:
+    pip install watchdog  # For folder watching
 """
 
 import json
 import os
 import re
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+# PDF parsing - pymupdf (fitz)
+try:
+    import fitz  # PyMuPDF
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    print("Warning: pymupdf not installed. PDF parsing disabled. Install with: pip install pymupdf")
+
+# Google Sheets API
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    SHEETS_SUPPORT = True
+except ImportError:
+    SHEETS_SUPPORT = False
+    print("Warning: gspread not installed. Google Sheets disabled. Install with: pip install gspread google-auth")
 
 
 class DocumentType(Enum):
@@ -46,7 +70,7 @@ class ExtractionResult:
     """Structured output from document extraction."""
     document_type: str
     source_file: str
-    extracted_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    extracted_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     confidence: str = "MEDIUM"
     data: dict = field(default_factory=dict)
     quality_checks: dict = field(default_factory=dict)
@@ -59,7 +83,7 @@ class ExtractionResult:
     def save(self, output_dir: str = "outputs/extractions"):
         """Save extraction result to the outputs directory."""
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        filename = f"{self.document_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        filename = f"{self.document_type}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
         filepath = Path(output_dir) / filename
         with open(filepath, "w") as f:
             f.write(self.to_json())
@@ -111,6 +135,311 @@ def classify_document(text: str) -> DocumentType:
         return DocumentType.UNKNOWN
 
     return max(scores, key=scores.get)
+
+
+# --- PDF Parsing ---
+
+def extract_text_from_pdf(pdf_path: str) -> dict:
+    """
+    Extract text content from a PDF file using PyMuPDF.
+    
+    Returns:
+        dict with keys: text, page_count, metadata, tables
+    """
+    if not PDF_SUPPORT:
+        raise ImportError("pymupdf not installed. Install with: pip install pymupdf")
+    
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+    
+    doc = fitz.open(pdf_path)
+    
+    result = {
+        "source_file": str(pdf_path),
+        "page_count": len(doc),
+        "metadata": doc.metadata,
+        "pages": [],
+        "full_text": "",
+        "tables": []
+    }
+    
+    full_text_parts = []
+    
+    for page_num, page in enumerate(doc, start=1):
+        page_text = page.get_text("text")
+        full_text_parts.append(page_text)
+        
+        # Extract tables (basic detection via text blocks)
+        blocks = page.get_text("blocks")
+        
+        result["pages"].append({
+            "page_number": page_num,
+            "text": page_text,
+            "char_count": len(page_text),
+            "block_count": len(blocks)
+        })
+    
+    result["full_text"] = "\n\n".join(full_text_parts)
+    result["total_chars"] = len(result["full_text"])
+    
+    doc.close()
+    return result
+
+
+def process_pdf_for_extraction(pdf_path: str) -> ExtractionResult:
+    """
+    Full pipeline: parse PDF, classify, and prepare for Claude extraction.
+    
+    Returns an ExtractionResult with the text ready for prompt-based extraction.
+    """
+    # Extract text
+    pdf_data = extract_text_from_pdf(pdf_path)
+    
+    # Classify document
+    doc_type = classify_document(pdf_data["full_text"])
+    
+    # Create extraction result
+    result = ExtractionResult(
+        document_type=doc_type.value,
+        source_file=str(pdf_path),
+        confidence="MEDIUM",
+        data={
+            "raw_text": pdf_data["full_text"][:50000],  # Limit for context window
+            "page_count": pdf_data["page_count"],
+            "metadata": pdf_data["metadata"]
+        },
+        notes=[f"Classified as {doc_type.value} based on content analysis"]
+    )
+    
+    # Map document type to recommended extraction prompt
+    prompt_mapping = {
+        DocumentType.FINANCIAL_STATEMENT: "prompts/extract_pl.md or prompts/extract_balance_sheet.md",
+        DocumentType.MANAGEMENT_ACCOUNTS: "prompts/extract_pl.md",
+        DocumentType.CONTRACT: "prompts/extract_contract_terms.md",
+        DocumentType.ORG_DATA: "prompts/extract_org_chart.md",
+        DocumentType.OPERATIONAL: "Custom extraction required",
+        DocumentType.LEGAL: "Custom extraction required",
+        DocumentType.UNKNOWN: "Manual classification required"
+    }
+    
+    result.notes.append(f"Recommended prompt: {prompt_mapping.get(doc_type, 'Unknown')}")
+    
+    return result
+
+
+def batch_process_pdfs(folder_path: str, output_dir: str = "outputs/extractions") -> list[dict]:
+    """
+    Process all PDFs in a folder and return extraction summaries.
+    """
+    folder = Path(folder_path)
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder not found: {folder_path}")
+    
+    results = []
+    pdf_files = list(folder.glob("*.pdf")) + list(folder.glob("*.PDF"))
+    
+    for pdf_file in pdf_files:
+        try:
+            result = process_pdf_for_extraction(str(pdf_file))
+            saved_path = result.save(output_dir)
+            results.append({
+                "file": str(pdf_file),
+                "status": "success",
+                "document_type": result.document_type,
+                "output": saved_path
+            })
+        except Exception as e:
+            results.append({
+                "file": str(pdf_file),
+                "status": "error",
+                "error": str(e)
+            })
+    
+    return results
+
+
+# --- Google Sheets Integration ---
+
+class GoogleSheetsClient:
+    """
+    Client for reading/writing RTS data to Google Sheets.
+    
+    Setup:
+    1. Create a Google Cloud project
+    2. Enable Google Sheets API
+    3. Create a service account and download JSON credentials
+    4. Share your spreadsheet with the service account email
+    5. Set GOOGLE_SHEETS_CREDENTIALS env var to the JSON file path
+    """
+    
+    SCOPES = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    
+    def __init__(self, credentials_path: Optional[str] = None):
+        if not SHEETS_SUPPORT:
+            raise ImportError("gspread not installed. Install with: pip install gspread google-auth")
+        
+        self.credentials_path = credentials_path or os.environ.get("GOOGLE_SHEETS_CREDENTIALS")
+        self.client = None
+        
+        if self.credentials_path and Path(self.credentials_path).exists():
+            self._authenticate()
+    
+    def _authenticate(self):
+        """Authenticate with Google Sheets API."""
+        creds = Credentials.from_service_account_file(
+            self.credentials_path,
+            scopes=self.SCOPES
+        )
+        self.client = gspread.authorize(creds)
+    
+    def is_connected(self) -> bool:
+        """Check if authenticated."""
+        return self.client is not None
+    
+    def create_spreadsheet(self, title: str) -> str:
+        """Create a new spreadsheet and return its ID."""
+        if not self.is_connected():
+            raise ConnectionError("Not authenticated. Provide credentials path.")
+        
+        spreadsheet = self.client.create(title)
+        return spreadsheet.id
+    
+    def open_spreadsheet(self, spreadsheet_id: str):
+        """Open an existing spreadsheet by ID."""
+        if not self.is_connected():
+            raise ConnectionError("Not authenticated. Provide credentials path.")
+        
+        return self.client.open_by_key(spreadsheet_id)
+    
+    def write_drl_to_sheet(self, drl: "DataRequestList", spreadsheet_id: str, 
+                           worksheet_name: str = "Data Request List"):
+        """
+        Write a Data Request List to a Google Sheet.
+        """
+        spreadsheet = self.open_spreadsheet(spreadsheet_id)
+        
+        # Get or create worksheet
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            worksheet.clear()
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=100, cols=10)
+        
+        # Headers
+        headers = ["Category", "Item", "Priority", "Status", "Received Date", 
+                   "Source File", "Notes", "Confidence"]
+        
+        # Data rows
+        rows = [headers]
+        for item in drl.items:
+            rows.append([
+                item.category,
+                item.item,
+                item.priority,
+                item.status,
+                item.received_date or "",
+                item.source_file or "",
+                item.notes or "",
+                item.confidence
+            ])
+        
+        worksheet.update(rows, "A1")
+        
+        # Format header row
+        worksheet.format("A1:H1", {
+            "backgroundColor": {"red": 0.2, "green": 0.4, "blue": 0.6},
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
+        })
+        
+        return f"Written {len(drl.items)} items to {worksheet_name}"
+    
+    def write_extraction_to_sheet(self, extraction: ExtractionResult, spreadsheet_id: str,
+                                   worksheet_name: str = "Extractions"):
+        """
+        Append an extraction result to an extractions log sheet.
+        """
+        spreadsheet = self.open_spreadsheet(spreadsheet_id)
+        
+        # Get or create worksheet
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=100, cols=10)
+            # Add headers
+            headers = ["Timestamp", "Document Type", "Source File", "Confidence", 
+                       "Data Summary", "Quality Checks", "Gaps", "Notes"]
+            worksheet.update([headers], "A1")
+        
+        # Append row
+        row = [
+            extraction.extracted_at,
+            extraction.document_type,
+            extraction.source_file,
+            extraction.confidence,
+            json.dumps(extraction.data)[:500],  # Truncate for sheet
+            json.dumps(extraction.quality_checks),
+            ", ".join(extraction.gaps),
+            "; ".join(extraction.notes)
+        ]
+        
+        worksheet.append_row(row)
+        return f"Appended extraction for {extraction.source_file}"
+    
+    def read_sheet_to_dict(self, spreadsheet_id: str, worksheet_name: str) -> list[dict]:
+        """
+        Read a worksheet into a list of dictionaries (header row as keys).
+        """
+        spreadsheet = self.open_spreadsheet(spreadsheet_id)
+        worksheet = spreadsheet.worksheet(worksheet_name)
+        
+        records = worksheet.get_all_records()
+        return records
+    
+    def write_working_capital_analysis(self, wc_data: dict, spreadsheet_id: str,
+                                        worksheet_name: str = "Working Capital"):
+        """
+        Write working capital analysis to a formatted sheet.
+        """
+        spreadsheet = self.open_spreadsheet(spreadsheet_id)
+        
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            worksheet.clear()
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=50, cols=5)
+        
+        rows = [
+            ["Working Capital Analysis", "", ""],
+            ["Generated", datetime.now(timezone.utc).isoformat(), ""],
+            ["", "", ""],
+            ["Metric", "Value", "Notes"],
+            ["Net Working Capital", f"${wc_data['net_working_capital']:,.0f}", ""],
+            ["NWC % of Revenue", f"{wc_data['nwc_pct_revenue']:.1f}%", ""],
+            ["Days Sales Outstanding", f"{wc_data['days_sales_outstanding']:.1f}", ""],
+            ["Days Payable Outstanding", f"{wc_data['days_payable_outstanding']:.1f}", ""],
+            ["Days Inventory Outstanding", f"{wc_data['days_inventory_outstanding']:.1f}", ""],
+            ["Cash Conversion Cycle", f"{wc_data['cash_conversion_cycle']:.1f} days", ""],
+            ["", "", ""],
+            ["Assessment Notes", "", ""]
+        ]
+        
+        for note in wc_data.get("notes", []):
+            rows.append(["", note, ""])
+        
+        worksheet.update(rows, "A1")
+        
+        # Format title
+        worksheet.format("A1", {"textFormat": {"bold": True, "fontSize": 14}})
+        worksheet.format("A4:C4", {
+            "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
+            "textFormat": {"bold": True}
+        })
+        
+        return f"Written working capital analysis to {worksheet_name}"
 
 
 # --- Data Request List Tracker ---
@@ -175,7 +504,7 @@ class DataRequestList:
         """Update the status of a DRL item."""
         if 0 <= item_index < len(self.items):
             self.items[item_index].status = status
-            self.items[item_index].received_date = datetime.utcnow().isoformat()
+            self.items[item_index].received_date = datetime.now(timezone.utc).isoformat()
             if source_file:
                 self.items[item_index].source_file = source_file
             if notes:
@@ -198,7 +527,7 @@ class DataRequestList:
             "pending": pending,
             "completion_pct": round((received + partial * 0.5) / total * 100, 1),
             "critical_gaps": [asdict(g) for g in critical_gaps],
-            "generated_at": datetime.utcnow().isoformat()
+            "generated_at": datetime.now(timezone.utc).isoformat()
         }
 
     def to_json(self) -> str:
@@ -298,20 +627,28 @@ def _assess_wc_health(dso, dpo, dio, ccc) -> list[str]:
 # --- Entry Point ---
 
 if __name__ == "__main__":
-    # Demo: Initialize a DRL and show gap report
+    import sys
+    
+    print("=" * 60)
+    print("RTS Data Extraction Pipeline")
+    print("=" * 60)
+    
+    # Demo 1: Data Request List Gap Report
+    print("\n📋 Data Request List — Gap Report\n")
     drl = DataRequestList()
-    print("=== RTS Data Request List — Gap Report ===\n")
     gap = drl.gap_report()
     print(f"Total Items: {gap['total_items']}")
     print(f"Received: {gap['received']}")
     print(f"Pending: {gap['pending']}")
     print(f"Completion: {gap['completion_pct']}%")
     print(f"\nCritical Gaps ({len(gap['critical_gaps'])}):")
-    for g in gap['critical_gaps']:
+    for g in gap['critical_gaps'][:5]:  # Show first 5
         print(f"  - [{g['category']}] {g['item']}")
+    if len(gap['critical_gaps']) > 5:
+        print(f"  ... and {len(gap['critical_gaps']) - 5} more")
 
-    # Demo: Working capital calculation
-    print("\n=== Working Capital Analysis Demo ===\n")
+    # Demo 2: Working Capital Calculation
+    print("\n📊 Working Capital Analysis\n")
     wc = calculate_working_capital_metrics(
         accounts_receivable=2_500_000,
         inventory=1_800_000,
@@ -323,3 +660,63 @@ if __name__ == "__main__":
         annual_cogs=9_000_000
     )
     print(json.dumps(wc, indent=2))
+
+    # Demo 3: PDF Parsing (if available)
+    print("\n📄 PDF Parsing Capability\n")
+    if PDF_SUPPORT:
+        print("✅ PyMuPDF installed — PDF parsing available")
+        # Check for sample PDF
+        sample_pdfs = list(Path(".").glob("**/*.pdf"))[:3]
+        if sample_pdfs:
+            print(f"   Found {len(sample_pdfs)} PDF(s) in workspace")
+            for pdf in sample_pdfs:
+                print(f"   - {pdf}")
+        else:
+            print("   No PDFs found in workspace. To test:")
+            print("   >>> from data_extraction import process_pdf_for_extraction")
+            print("   >>> result = process_pdf_for_extraction('path/to/file.pdf')")
+    else:
+        print("❌ PyMuPDF not installed")
+        print("   Install with: pip install pymupdf")
+
+    # Demo 4: Google Sheets Integration (if available)
+    print("\n📊 Google Sheets Integration\n")
+    if SHEETS_SUPPORT:
+        print("✅ gspread installed — Google Sheets available")
+        creds_path = os.environ.get("GOOGLE_SHEETS_CREDENTIALS")
+        if creds_path and Path(creds_path).exists():
+            print(f"   Credentials found: {creds_path}")
+            print("   Ready to connect!")
+        else:
+            print("   To enable:")
+            print("   1. Create a service account in Google Cloud Console")
+            print("   2. Download the JSON credentials")
+            print("   3. Set GOOGLE_SHEETS_CREDENTIALS=/path/to/creds.json")
+            print("   4. Share your spreadsheet with the service account email")
+    else:
+        print("❌ gspread not installed")
+        print("   Install with: pip install gspread google-auth")
+
+    # Demo 5: Document Classification
+    print("\n🔍 Document Classification Demo\n")
+    sample_texts = [
+        "Balance Sheet as of December 31, 2025. Total Assets: $10M",
+        "Master Services Agreement between Acme Corp and XYZ Inc. Effective Date: Jan 1, 2025",
+        "Organization Chart - Q4 2025. Total Headcount: 127 employees",
+        "Monthly KPI Report - Sales increased 15% vs prior period"
+    ]
+    for text in sample_texts:
+        doc_type = classify_document(text)
+        print(f"  '{text[:50]}...'")
+        print(f"  → Classified as: {doc_type.value}\n")
+
+    print("=" * 60)
+    print("Pipeline ready. Import functions for programmatic use:")
+    print("  from data_extraction import (")
+    print("      extract_text_from_pdf,")
+    print("      process_pdf_for_extraction,")
+    print("      GoogleSheetsClient,")
+    print("      DataRequestList,")
+    print("      calculate_working_capital_metrics")
+    print("  )")
+    print("=" * 60)

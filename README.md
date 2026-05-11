@@ -91,18 +91,56 @@ claude
 rts-claude-system/
 ├── CLAUDE.md                          # Master playbook
 ├── .mcp.json                          # MCP server configuration
+├── requirements.txt                   # Python dependencies
 ├── .claude/
-│   └── skills/
-│       ├── rts-methodology/SKILL.md   # Core RTS framework
-│       ├── data-collection/SKILL.md   # Document extraction patterns
-│       ├── financial-analysis/SKILL.md # Financial modelling
-│       └── report-generation/SKILL.md # Deliverable templates
+│   ├── skills/
+│   │   ├── rts-methodology/SKILL.md   # Core RTS framework
+│   │   ├── data-collection/SKILL.md   # Document extraction patterns
+│   │   ├── financial-analysis/SKILL.md # Financial modelling
+│   │   └── report-generation/SKILL.md # Deliverable templates
+│   └── agents/
+│       ├── lead-analyst.agent.md      # Orchestrator agent
+│       ├── financial-modeller.agent.md # Financial specialist
+│       ├── operations-analyst.agent.md # Operations specialist
+│       ├── data-collector.agent.md    # Data extraction specialist
+│       └── report-writer.agent.md     # Deliverables specialist
+├── prompts/
+│   ├── extract_pl.md                  # P&L extraction template
+│   ├── extract_balance_sheet.md       # Balance sheet extraction
+│   ├── extract_contract_terms.md      # Contract terms extraction
+│   ├── extract_debt_schedule.md       # Debt analysis extraction
+│   └── extract_org_chart.md           # Org/headcount extraction
 ├── scripts/
 │   └── data_extraction.py             # Python data pipeline
+│       # Includes: PDF parsing, Google Sheets API, document
+│       # classification, working capital calcs, DRL tracking
 ├── docs/
 │   ├── operator_runbook.md            # For junior analysts
 │   └── maintenance_guide.md           # For technical team
 └── README.md                          # This file
+```
+
+## Python Pipeline Setup
+
+```bash
+# Install dependencies (optional - core features work without them)
+pip install -r requirements.txt
+
+# Or install specific features:
+pip install pymupdf          # PDF parsing
+pip install gspread google-auth  # Google Sheets integration
+
+# Run the demo
+python scripts/data_extraction.py
+
+# Use programmatically
+python -c "
+from scripts.data_extraction import (
+    process_pdf_for_extraction,
+    GoogleSheetsClient,
+    calculate_working_capital_metrics
+)
+"
 ```
 
 ## Key Design Decisions

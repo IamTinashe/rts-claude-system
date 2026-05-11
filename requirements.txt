@@ -1,0 +1,15 @@
+# RTS Data Extraction Pipeline Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core (always needed)
+# No external dependencies for basic functionality
+
+# PDF Parsing (optional)
+pymupdf>=1.24.0
+
+# Google Sheets Integration (optional)
+gspread>=6.0.0
+google-auth>=2.28.0
+
+# Development (optional)
+# watchdog>=4.0.0  # For folder watching
