@@ -22,6 +22,8 @@ Optional:
     pip install watchdog  # For folder watching
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -29,23 +31,29 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 # PDF parsing - pymupdf (fitz)
+fitz: Any = None
+PDF_SUPPORT = False
 try:
-    import fitz  # PyMuPDF
+    import fitz as _fitz  # type: ignore[import-not-found]
+    fitz = _fitz
     PDF_SUPPORT = True
 except ImportError:
-    PDF_SUPPORT = False
     print("Warning: pymupdf not installed. PDF parsing disabled. Install with: pip install pymupdf")
 
 # Google Sheets API
+gspread: Any = None
+Credentials: Any = None
+SHEETS_SUPPORT = False
 try:
-    import gspread
-    from google.oauth2.service_account import Credentials
+    import gspread as _gspread  # type: ignore[import-not-found]
+    from google.oauth2.service_account import Credentials as _Credentials  # type: ignore[import-not-found]
+    gspread = _gspread
+    Credentials = _Credentials
     SHEETS_SUPPORT = True
 except ImportError:
-    SHEETS_SUPPORT = False
     print("Warning: gspread not installed. Google Sheets disabled. Install with: pip install gspread google-auth")
 
 
@@ -125,7 +133,7 @@ CLASSIFICATION_PATTERNS = {
 def classify_document(text: str) -> DocumentType:
     """Classify a document based on content patterns."""
     text_lower = text.lower()
-    scores = {}
+    scores: dict[DocumentType, int] = {}
     for doc_type, patterns in CLASSIFICATION_PATTERNS.items():
         score = sum(1 for p in patterns if re.search(p, text_lower))
         if score > 0:
@@ -134,29 +142,29 @@ def classify_document(text: str) -> DocumentType:
     if not scores:
         return DocumentType.UNKNOWN
 
-    return max(scores, key=scores.get)
+    return max(scores, key=lambda k: scores[k])
 
 
 # --- PDF Parsing ---
 
-def extract_text_from_pdf(pdf_path: str) -> dict:
+def extract_text_from_pdf(pdf_path: str) -> dict[str, Any]:
     """
     Extract text content from a PDF file using PyMuPDF.
     
     Returns:
         dict with keys: text, page_count, metadata, tables
     """
-    if not PDF_SUPPORT:
+    if not PDF_SUPPORT or fitz is None:
         raise ImportError("pymupdf not installed. Install with: pip install pymupdf")
     
-    pdf_path = Path(pdf_path)
-    if not pdf_path.exists():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+    pdf_path_obj = Path(pdf_path)
+    if not pdf_path_obj.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path_obj}")
     
-    doc = fitz.open(pdf_path)
+    doc = fitz.open(str(pdf_path_obj))
     
-    result = {
-        "source_file": str(pdf_path),
+    result: dict[str, Any] = {
+        "source_file": str(pdf_path_obj),
         "page_count": len(doc),
         "metadata": doc.metadata,
         "pages": [],
@@ -279,17 +287,19 @@ class GoogleSheetsClient:
     ]
     
     def __init__(self, credentials_path: Optional[str] = None):
-        if not SHEETS_SUPPORT:
+        if not SHEETS_SUPPORT or gspread is None:
             raise ImportError("gspread not installed. Install with: pip install gspread google-auth")
         
-        self.credentials_path = credentials_path or os.environ.get("GOOGLE_SHEETS_CREDENTIALS")
-        self.client = None
+        self.credentials_path: Optional[str] = credentials_path or os.environ.get("GOOGLE_SHEETS_CREDENTIALS")
+        self.client: Any = None
         
         if self.credentials_path and Path(self.credentials_path).exists():
             self._authenticate()
     
-    def _authenticate(self):
+    def _authenticate(self) -> None:
         """Authenticate with Google Sheets API."""
+        if Credentials is None or gspread is None or self.credentials_path is None:
+            return
         creds = Credentials.from_service_account_file(
             self.credentials_path,
             scopes=self.SCOPES
@@ -302,15 +312,15 @@ class GoogleSheetsClient:
     
     def create_spreadsheet(self, title: str) -> str:
         """Create a new spreadsheet and return its ID."""
-        if not self.is_connected():
+        if not self.is_connected() or self.client is None:
             raise ConnectionError("Not authenticated. Provide credentials path.")
         
         spreadsheet = self.client.create(title)
-        return spreadsheet.id
+        return str(spreadsheet.id)
     
-    def open_spreadsheet(self, spreadsheet_id: str):
+    def open_spreadsheet(self, spreadsheet_id: str) -> Any:
         """Open an existing spreadsheet by ID."""
-        if not self.is_connected():
+        if not self.is_connected() or self.client is None:
             raise ConnectionError("Not authenticated. Provide credentials path.")
         
         return self.client.open_by_key(spreadsheet_id)
@@ -322,6 +332,9 @@ class GoogleSheetsClient:
         """
         spreadsheet = self.open_spreadsheet(spreadsheet_id)
         
+        if gspread is None:
+            raise ImportError("gspread not installed")
+        
         # Get or create worksheet
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
@@ -330,16 +343,16 @@ class GoogleSheetsClient:
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=100, cols=10)
         
         # Headers
-        headers = ["Category", "Item", "Priority", "Status", "Received Date", 
-                   "Source File", "Notes", "Confidence"]
+        headers: list[str] = ["Category", "Item", "Priority", "Status", "Received Date", 
+                              "Source File", "Notes", "Confidence"]
         
         # Data rows
-        rows = [headers]
+        rows: list[list[str]] = [headers]
         for item in drl.items:
             rows.append([
                 item.category,
                 item.item,
-                item.priority,
+                str(item.priority),
                 item.status,
                 item.received_date or "",
                 item.source_file or "",
@@ -362,6 +375,9 @@ class GoogleSheetsClient:
         """
         Append an extraction result to an extractions log sheet.
         """
+        if gspread is None:
+            raise ImportError("gspread not installed")
+        
         spreadsheet = self.open_spreadsheet(spreadsheet_id)
         
         # Get or create worksheet
@@ -370,12 +386,12 @@ class GoogleSheetsClient:
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=100, cols=10)
             # Add headers
-            headers = ["Timestamp", "Document Type", "Source File", "Confidence", 
-                       "Data Summary", "Quality Checks", "Gaps", "Notes"]
+            headers: list[str] = ["Timestamp", "Document Type", "Source File", "Confidence", 
+                                  "Data Summary", "Quality Checks", "Gaps", "Notes"]
             worksheet.update([headers], "A1")
         
         # Append row
-        row = [
+        row: list[str] = [
             extraction.extracted_at,
             extraction.document_type,
             extraction.source_file,
@@ -404,6 +420,9 @@ class GoogleSheetsClient:
         """
         Write working capital analysis to a formatted sheet.
         """
+        if gspread is None:
+            raise ImportError("gspread not installed")
+        
         spreadsheet = self.open_spreadsheet(spreadsheet_id)
         
         try:
@@ -412,7 +431,7 @@ class GoogleSheetsClient:
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=50, cols=5)
         
-        rows = [
+        rows: list[list[str]] = [
             ["Working Capital Analysis", "", ""],
             ["Generated", datetime.now(timezone.utc).isoformat(), ""],
             ["", "", ""],
@@ -500,7 +519,7 @@ class DataRequestList:
             ))
 
     def update_status(self, item_index: int, status: str,
-                      source_file: str = None, notes: str = None):
+                      source_file: Optional[str] = None, notes: Optional[str] = None) -> None:
         """Update the status of a DRL item."""
         if 0 <= item_index < len(self.items):
             self.items[item_index].status = status

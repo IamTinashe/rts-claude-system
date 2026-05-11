@@ -1,0 +1,10 @@
+{
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__"
+  ]
+}
